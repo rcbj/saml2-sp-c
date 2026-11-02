@@ -2,7 +2,22 @@
 
 Server-side SAML 2.0 service provider with CAEP and RISC for C and C++. The protocol is implemented once, in C++17. The C header declares the same operations as `extern "C"`. Those functions are defined in this library and call the C++ classes. C callers and C++ callers link one library binary.
 
-Version 0.1.0. License: MIT. `develop` and `main` are one commit. Publishing is not set up.
+Version 0.1.0. License: MIT. `develop` and `main` are one commit. ## Using it from CMake
+
+The build installs the library, its public headers and a CMake package. It builds static by
+default and shared with `-DBUILD_SHARED_LIBS=ON`; `-DIYA_SAML_BUILD_TESTS=OFF -DIYA_SAML_BUILD_PROGRAMS=OFF`
+builds the library alone (both are on only when this is the top-level project). Then:
+
+```cmake
+find_package(iya_saml REQUIRED)
+target_link_libraries(app PRIVATE iya::saml)
+```
+
+The package finds the library's own dependencies, and the target carries the include
+directory and C++17. The Docker test stage checks this: it installs the static and the shared
+library and builds the C++ smoke test against each through `find_package` (`tests/package/`).
+
+A pull request merged into `main` releases the library after the test workflow succeeds on that commit: `release.yml` tags `v<VERSION>` and makes a GitHub Release, whose source archive is what a package recipe (such as a ConanCenter one) builds from. A direct push does not release. A tag that already exists stays; the next release is a new version in `VERSION`, which the CMake project, the package and the tag all read.
 
 ## Call surfaces
 

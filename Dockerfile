@@ -8,6 +8,7 @@ WORKDIR /src
 # Only what the build and the suite read, so a new trust chain in demo/ does not
 # rebuild the binaries.
 COPY CMakeLists.txt VERSION ./
+COPY cmake cmake
 COPY include include
 COPY src src
 COPY tests tests
@@ -16,6 +17,8 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j
 
 FROM build AS test
 RUN ctest --test-dir build --output-on-failure
+# The installed package, static and shared, consumed through find_package.
+RUN sh tests/package/check.sh iya_saml iya_saml IYA_SAML
 
 FROM debian:bookworm-slim
 # python3 and openssl run scripts/configure_iya_sts.py inside this image, where
