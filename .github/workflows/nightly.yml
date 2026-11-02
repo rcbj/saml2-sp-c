@@ -1,0 +1,25 @@
+# SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
+# SPDX-License-Identifier: MIT
+#
+# The nightly half. The unit suite is the test image. The live half signs the demo in to a fresh
+# iya-sts. Push and pull-request CI stays in tests.yml.
+name: Nightly
+
+on:
+  schedule:
+    # 07:58 UTC. The authentication client libraries share one two-hour window.
+    - cron: '58 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Unit suite
+        run: docker build --target test .
+      - name: Live iya-sts
+        run: python3 scripts/live_iya_sts.py

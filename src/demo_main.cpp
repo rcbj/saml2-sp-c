@@ -47,6 +47,8 @@ bool g_signals_off = false;
 std::string g_ssf_transmitter;
 int g_ssf_poll_ms = 0;
 std::string g_receiver_state = "not configured (no ssf block in the configuration file)";
+std::mutex g_live_mu;  // g_receiver_state and g_events
+std::vector<std::pair<std::string, std::string>> g_events;  // type and jti of each accepted event
 std::unique_ptr<iya::saml::ServiceProvider> g_sp;
 std::string g_sp_error;
 std::once_flag g_sp_once;
@@ -62,6 +64,17 @@ struct Held {
 std::map<std::string, Held> g_sessions;
 
 constexpr auto kSession = std::chrono::hours(8);
+constexpr const char* kSessionRevoked = "https://schemas.openid.net/secevent/caep/event-type/session-revoked";
+
+void set_state(const std::string& state) {
+  std::lock_guard<std::mutex> lock(g_live_mu);
+  g_receiver_state = state;
+}
+
+std::string receiver_state() {
+  std::lock_guard<std::mutex> lock(g_live_mu);
+  return g_receiver_state;
+}
 
 std::string read_text(const std::string& path) {
   std::ifstream in(path, std::ios::binary);
@@ -250,7 +263,7 @@ void configure(int argc, char** argv) {
 
 void start_receiver(iya::saml::ServiceProvider& sp) {
   if (sp.has_signals() && sp.signals() && !*sp.signals()) {
-    g_receiver_state = "not configured (signals are off)";
+    set_state("not configured (signals are off)");
     return;
   }
   if (g_ssf_transmitter.empty() || g_receiver) return;
@@ -270,16 +283,36 @@ void start_receiver(iya::saml::ServiceProvider& sp) {
   try {
     g_receiver = std::make_unique<iya::saml::SignalsReceiver>(iya::saml::SignalsReceiver::create(std::move(options)));
   } catch (const std::exception& ex) {
-    g_receiver_state = std::string("not running: ") + ex.what();
+    set_state(std::string("not running: ") + ex.what());
     return;
   }
   iya::saml::SignalsReceiver* built = g_receiver.get();
+  built->on("*", [built](iya::saml::SignalEvent& event) {
+    {
+      std::lock_guard<std::mutex> lock(g_live_mu);
+      g_events.emplace_back(event.type, event.jti);
+    }
+    // The assertion's SessionIndex may be the assertion id rather than the
+    // sign-on session the CAEP event names, so nothing matched and nothing was
+    // ended. This demo then ends its one local session. Demo code, not the library.
+    if (event.type != kSessionRevoked || event.ended) return;
+    std::string sid;
+    {
+      std::lock_guard<std::mutex> lock(g_sessions_mu);
+      if (g_sessions.size() != 1) return;
+      sid = g_sessions.begin()->first;
+      g_sessions.clear();
+    }
+    built->untrack(sid);
+    std::printf("ssf: the assertion SessionIndex is not the CAEP session id; ended this demo's one session\n");
+    std::fflush(stdout);
+  });
   g_receiver_thread = std::thread([built] {
     try {
       built->start();
-      g_receiver_state = "polling stream " + built->stream_id() + " at " + g_ssf_transmitter;
+      set_state("polling stream " + built->stream_id() + " at " + g_ssf_transmitter);
     } catch (const std::exception& ex) {
-      g_receiver_state = std::string("not running: ") + ex.what();
+      set_state(std::string("not running: ") + ex.what());
       std::printf("ssf: the receiver did not start: %s\n", ex.what());
       std::fflush(stdout);
     }
@@ -399,6 +432,50 @@ void handle(int fd, const Request& request) {
     respond(fd, 200, "OK", {{"content-type", "text/plain"}}, "ok");
     return;
   }
+  if (request.path == "/live-status" && request.method == "GET") {
+    // signedIn, subject, receiver state and the accepted events. Never an assertion or a token.
+    provider();
+    auto cookies = cookies_of(request);
+    Held current;
+    bool signed_in = current_session(cookies["sid"], &current);
+    iya::saml::Json out;
+    out.type = iya::saml::Json::Type::Object;
+    iya::saml::Json flag;
+    flag.type = iya::saml::Json::Type::Bool;
+    flag.b = signed_in;
+    out.fields.emplace_back("signedIn", flag);
+    iya::saml::Json subject;
+    if (signed_in) {
+      subject.type = iya::saml::Json::Type::String;
+      subject.text = current.login.name_id;
+    }
+    out.fields.emplace_back("subject", subject);
+    iya::saml::Json list;
+    list.type = iya::saml::Json::Type::Array;
+    {
+      std::lock_guard<std::mutex> lock(g_live_mu);
+      iya::saml::Json state;
+      state.type = iya::saml::Json::Type::String;
+      state.text = g_receiver_state;
+      out.fields.emplace_back("receiver", state);
+      for (const auto& item : g_events) {
+        iya::saml::Json row;
+        row.type = iya::saml::Json::Type::Object;
+        iya::saml::Json type;
+        type.type = iya::saml::Json::Type::String;
+        type.text = item.first;
+        iya::saml::Json jti;
+        jti.type = iya::saml::Json::Type::String;
+        jti.text = item.second;
+        row.fields.emplace_back("type", type);
+        row.fields.emplace_back("jti", jti);
+        list.items.push_back(row);
+      }
+    }
+    out.fields.emplace_back("events", list);
+    respond(fd, 200, "OK", {{"content-type", "application/json"}, {"cache-control", "no-store"}}, iya::saml::json_dump(out));
+    return;
+  }
   if (request.path == "/styles.css" || request.path == "/app.js") {
     std::string file = request.path == "/styles.css" ? "demo/public/styles.css" : "demo/public/app.js";
     std::string body = read_text(file);
@@ -424,7 +501,7 @@ void handle(int fd, const Request& request) {
     bool signed_in = current_session(cookies["sid"], &current);
     std::string body = "<h1>SAML service provider</h1>";
     if (!problem.empty() && !signed_in) body += "<p class=\"problem\">" + html_escape(problem) + "</p>";
-    body += "<p>Shared Signals: " + html_escape(g_receiver_state) + "</p>";
+    body += "<p>Shared Signals: " + html_escape(receiver_state()) + "</p>";
     if (signed_in) {
       body += "<p>Signed in as <strong>" + html_escape(current.login.name_id) + "</strong> (" + html_escape(current.login.binding) + ").</p>";
       body += "<form method=\"post\" action=\"/logout\"><button type=\"submit\">Log out</button></form>";

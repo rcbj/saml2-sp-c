@@ -4,6 +4,10 @@
 """Register the demo with a running iya-sts. The metadata documents do the SAML work.
 
 This copy asks the saml2-sp command for keys, metadata, and a summary of the identity provider.
+
+Every run writes iya-sts's listener CA trust chain (leaf, TLS Issuing CA, Intermediate, Root) to the
+file idpCa names, through scripts/trust_chain.py. The demo image build copies that file in, so
+rebuild the image after running this against a different iya-sts.
 """
 
 from __future__ import annotations
@@ -28,6 +32,9 @@ ENCRYPTION = {
     "saml2KeyTransportAlgorithm": "rsa-oaep",
 }
 MULTIPLE_ACCOUNTS = {"key": "authn.multipleAccounts", "value": True}
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from trust_chain import save_trust_chain  # noqa: E402
 
 
 def usage() -> str:
@@ -291,25 +298,12 @@ def container_port(cwd: str | None = None) -> str | None:
     return None
 
 
-def fetch_tls_root(origin: str) -> tuple[str, str, str]:
-    parsed = urllib.parse.urlsplit(origin)
-    host = parsed.hostname or ""
-    port = parsed.port or 443
-    proc = subprocess.run(
-        ["openssl", "s_client", "-showcerts", "-servername", host, "-connect", f"{host}:{port}"],
-        input=b"", capture_output=True, timeout=20, check=False,
-    )
-    pems = re.findall(r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----", proc.stdout.decode("utf-8", "replace"), re.S)
-    if not pems:
-        raise SystemExit(f"could not read a TLS certificate from {origin}")
-    return pems[-1] + "\n", "the last certificate openssl presented", ""
-
-
 def _request(url: str, method: str, headers: dict, body: bytes | None, ca: str | None):
     request = urllib.request.Request(url, data=body, headers=headers, method=method)
     context = None
     if url.startswith("https://"):
         context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         if ca:
             context.load_verify_locations(cadata=ca)
     try:
@@ -370,8 +364,8 @@ def main(argv: list[str] | None = None) -> None:
         xml = "<the SP metadata from the configuration>" if Path(files.cert).exists() else "<the SP metadata, once the key pair exists>"
         if not Path(files.key).exists():
             print(f"# would generate the key pair {files.key}, {files.cert}")
-        if files.idp_ca and not Path(files.idp_ca).exists():
-            print(f"# would save {origin}'s TLS root to {files.idp_ca}")
+        if files.idp_ca:
+            print(f"# would save {origin}'s listener CA trust chain to {files.idp_ca}")
         print(f"# would write {files.sp_metadata}")
         for call in plan_for(files, base, args.test_user, xml):
             body = f"\n{json.dumps(call['body'], indent=2)}" if call.get("body") is not None else ""
@@ -382,14 +376,17 @@ def main(argv: list[str] | None = None) -> None:
         _generate_keys(args.config)
     ca = None
     if files.idp_ca:
-        if not Path(files.idp_ca).exists():
-            pem, subject, fingerprint = fetch_tls_root(origin)
-            Path(files.idp_ca).parent.mkdir(parents=True, exist_ok=True)
-            Path(files.idp_ca).write_text(pem, encoding="utf-8")
-            print(f"Saved {origin}'s TLS root to {files.idp_ca} (trusted on first use):")
-            print(f"  {subject}\n  sha256 {fingerprint}")
-            print("  Compare it with the Root CA on iya-sts's Server configuration → PKI page.")
-        ca = Path(files.idp_ca).read_text(encoding="utf-8")
+        try:
+            chain = save_trust_chain(origin, files.idp_ca)
+        except Exception as error:
+            raise SystemExit(f"could not read {origin}'s listener CA trust chain: {error}") from error
+        ca = chain["pem"]
+        subject = chain["anchor"].subject.rfc4514_string().replace("\n", ", ")
+        print(f"Saved {origin}'s listener CA trust chain ({chain['count']} certificate(s)) to {files.idp_ca} (trusted on first use)")
+        print(f"  trust anchor {subject}")
+        print(f"  sha256 {chain['fingerprint']}")
+        print("  Compare the anchor with the Root CA on iya-sts's Server configuration → PKI page.")
+        print("  The demo image copies this file in when it is built: rebuild it (docker compose build).")
     sp_metadata_xml = metadata_for(args.config, files.entity_id, files.acs_url)
     Path(files.sp_metadata).parent.mkdir(parents=True, exist_ok=True)
     Path(files.sp_metadata).write_text(sp_metadata_xml, encoding="utf-8")
