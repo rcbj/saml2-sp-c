@@ -25,6 +25,9 @@
 
 namespace iya::saml {
 
+// XML namespace names and algorithm identifiers. They are compared and written
+// into documents, never fetched; the W3C fixed the http:// ones, and an
+// https:// spelling would be a different name that no peer recognises.
 constexpr const char* kNsSamlp = "urn:oasis:names:tc:SAML:2.0:protocol";
 constexpr const char* kNsSaml = "urn:oasis:names:tc:SAML:2.0:assertion";
 constexpr const char* kNsMd = "urn:oasis:names:tc:SAML:2.0:metadata";

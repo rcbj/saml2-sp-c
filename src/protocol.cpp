@@ -509,6 +509,7 @@ IdpInfo read_idp_metadata(const std::string& xml, const std::string& wanted) {
 }
 
 std::string write_sp_metadata(const std::string& entity_id, const std::string& acs_url, X509* cert, bool want_signed, const std::string& name_id_format) {
+  // XML Encryption algorithm identifiers, written into metadata, never fetched.
   static const char* methods[] = {"http://www.w3.org/2009/xmlenc11#aes256-gcm", "http://www.w3.org/2009/xmlenc11#aes128-gcm", "http://www.w3.org/2009/xmlenc11#rsa-oaep",
                                   "http://www.w3.org/2001/04/xmlenc#rsa-oaep-mgf1p"};
   std::string key_info = "<ds:KeyInfo><ds:X509Data><ds:X509Certificate>" + pem_body(certificate_to_pem(cert)) + "</ds:X509Certificate></ds:X509Data></ds:KeyInfo>";
