@@ -2641,11 +2641,16 @@ static int metadata_over(const char* host) {
   memset(&err, 0, sizeof err);
   iya_saml_sp* sp = iya_saml_create(json, "", &err);
   free(json);
+  /* Join before reading served (#20). The thread sets it after http_write, and
+   * the library returns as soon as it has read the whole response, so a check
+   * before the join raced the thread and failed once in CI. The join is also
+   * what makes the thread's store visible here. */
+  pthread_join(m.thread, NULL);
   int rc = 0;
   if (!sp) rc = fail_err(host, &err);
-  else if (strcmp(iya_saml_idp_entity_id(sp), kIdp) != 0 || !m.served) rc = fail("metadata not read");
+  else if (strcmp(iya_saml_idp_entity_id(sp), kIdp) != 0) rc = fail("metadata not read");
+  else if (!m.served) rc = fail("metadata not served by the loopback listener");
   iya_saml_sp_free(sp);
-  pthread_join(m.thread, NULL);
   close(m.l.fd);
   return rc;
 }
@@ -2654,10 +2659,17 @@ static int test_plain_loopback(void) {
   /* Plain http to loopback still works: 127.0.0.1 and localhost. */
   if (metadata_over("127.0.0.1")) return 1;
   if (metadata_over("localhost")) return 1;
-  /* https is not touched by the rule: a name that does not resolve fails as a
-   * connection failure, not as a refusal of plain http. */
+  /* https is not touched by the rule: https to 0.0.0.0, which the rule refuses
+   * over plain http, fails as a connection failure, not as a refusal. The port
+   * is one a listener just gave back, so nothing answers it. It was
+   * https://idp.invalid until #20, which asked the machine's DNS resolvers and
+   * took twenty seconds on a laptop whose resolvers do not answer .invalid. */
+  Listener gone = listen_loopback();
+  close(gone.fd);
+  char url[96];
+  snprintf(url, sizeof url, "https://0.0.0.0:%d/saml2/metadata", gone.port);
   iya_saml_error err;
-  if (!create_fails("https://idp.invalid/saml2/metadata", &err)) return fail("idp.invalid resolved");
+  if (!create_fails(url, &err)) return fail("https to a closed port accepted");
   if (strcmp(err.code, "metadata") != 0 || contains(err.message, "is refused")) {
     printf("FAIL https: %s %s\n", err.code, err.message);
     return 1;
