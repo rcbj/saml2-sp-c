@@ -38,6 +38,8 @@ Signatures and decryption are real. The stub identity provider signs with this l
 
 `idpCa` (demo default `file:generated/idp-ca.pem`) is iya-sts's listener CA trust chain. `scripts/configure_iya_sts.py` writes the whole chain on every run via `scripts/trust_chain.py` (`GET /tls/server-certificate`, falling back to the handshake) and prints the path, anchor subject and SHA-256. `src/http.cpp` loads every PEM block as an anchor and verifies the host name (`SSL_set1_host`, or `X509_VERIFY_PARAM_set1_ip_asc` for an IP literal, which gets no SNI); there is no pinning shortcut. The build stage compiles from `CMakeLists.txt`, `VERSION`, `include`, `src`, `tests`, `scripts`; the demo stage then runs `COPY demo demo`; `.dockerignore` excludes `demo/generated/*` except `idp-ca.pem`, so the image carries the chain and no keys, and a build without it still succeeds. Rebuild the demo image after re-running the install script against a different iya-sts.
 
+The install script never prints a generated test-user password: it writes it to `demo/generated/<user>.password` (created mode 0600) and prints only that path. No line it or the live script prints carries anything derived from a password or secret.
+
 ## Layout
 
 `include/iya_saml.h`, `include/iya/saml.hpp`, `src/*.cpp`, CLI target `saml2-sp`, demo binary `saml-demo`, `scripts/configure_iya_sts.py`, `scripts/trust_chain.py`, `scripts/live_iya_sts.py`, `.github/workflows/nightly.yml`, `Dockerfile`, `docker-compose.yml`. The image name is `saml2-sp-c-demo`. Compose uses `network_mode: host`, service `saml-demo`, and `ENV PORT=3000` in the image. `GET /healthz` returns body `ok`.
