@@ -2372,6 +2372,223 @@ static int test_no_poll_delivery(void) {
   return bad;
 }
 
+/* Plain http off loopback (#8). These run inside three registered tests
+ * (TestReadsTheIdentityProviderFromItsMetadata,
+ * TestRefusesAnArtifactFromAnotherIdentityProvider,
+ * TestRefusesATransmitterWithoutPollDelivery) and by their own names when the
+ * binary is run by hand. Each fetch (metadata, ArtifactResolve, the
+ * transmitter) is refused before a connection is opened. http://example.com
+ * names a host off this machine; http://0.0.0.0:<port> is not loopback either
+ * but Linux delivers it to a socket on 127.0.0.1, so a listener there shows
+ * whether the library opened a connection at all. */
+typedef struct {
+  int fd;
+  int port;
+} Listener;
+
+static Listener listen_loopback(void) {
+  Listener l = {-1, 0};
+  l.fd = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  bind(l.fd, (struct sockaddr*)&addr, sizeof addr);
+  listen(l.fd, 4);
+  socklen_t len = sizeof addr;
+  getsockname(l.fd, (struct sockaddr*)&addr, &len);
+  l.port = ntohs(addr.sin_port);
+  return l;
+}
+
+/* 1 when a connection is waiting to be accepted. */
+static int connection_waiting(Listener* l) {
+  fd_set fds;
+  FD_ZERO(&fds);
+  FD_SET(l->fd, &fds);
+  struct timeval tv = {0, 100000};
+  return select(l->fd + 1, &fds, NULL, NULL, &tv) > 0;
+}
+
+static int refused_plain(const char* what, const iya_saml_error* err, const char* code, const char* host) {
+  char want[128];
+  snprintf(want, sizeof want, "http://%s is refused", host);
+  if (strcmp(err->code, code) != 0 || !contains(err->message, want) || !contains(err->message, "use https")) {
+    printf("FAIL %s: code %s want %s: %s\n", what, err->code, code, err->message);
+    return 1;
+  }
+  return 0;
+}
+
+static char* url_config(const char* metadata_url) {
+  char* key = json_quote(sp_key);
+  char* cert = json_quote(sp_cert);
+  char* meta = json_quote(metadata_url);
+  size_t cap = strlen(key) + strlen(cert) + strlen(meta) + 512;
+  char* out = malloc(cap);
+  snprintf(out, cap, "{\"entityId\":\"%s\",\"acsUrl\":\"%s\",\"privateKey\":%s,\"certificate\":%s,\"idpMetadata\":%s}", kSp, kAcs, key, cert, meta);
+  free(key);
+  free(cert);
+  free(meta);
+  return out;
+}
+
+static int create_fails(const char* metadata_url, iya_saml_error* err) {
+  char* json = url_config(metadata_url);
+  memset(err, 0, sizeof *err);
+  iya_saml_sp* sp = iya_saml_create(json, "", err);
+  free(json);
+  if (sp) {
+    iya_saml_sp_free(sp);
+    return 0;
+  }
+  return 1;
+}
+
+static int test_plain_metadata(void) {
+  iya_saml_error err;
+  if (!create_fails("http://example.com/saml2/metadata", &err)) return fail("example.com metadata accepted");
+  if (refused_plain("example.com", &err, "metadata", "example.com")) return 1;
+  Listener l = listen_loopback();
+  char url[96];
+  snprintf(url, sizeof url, "http://0.0.0.0:%d/saml2/metadata", l.port);
+  int rc = 0;
+  char host[32];
+  snprintf(host, sizeof host, "0.0.0.0:%d", l.port);
+  if (!create_fails(url, &err)) rc = fail("0.0.0.0 metadata accepted");
+  if (!rc) rc = refused_plain("0.0.0.0", &err, "metadata", host);
+  if (!rc && connection_waiting(&l)) rc = fail("a connection was opened");
+  close(l.fd);
+  /* Userinfo is never loopback, and never in the message. */
+  if (!rc && !create_fails("http://alice:s3cret@localhost:1/m", &err)) rc = fail("userinfo accepted");
+  if (!rc) rc = refused_plain("userinfo", &err, "metadata", "localhost:1");
+  if (!rc && (contains(err.message, "s3cret") || contains(err.message, "alice"))) rc = fail("userinfo in the message");
+  return rc;
+}
+
+static int artifact_refused(const char* ars_url, const char* host, Listener* l) {
+  iya_saml_error err;
+  memset(&err, 0, sizeof err);
+  iya_saml_sp* sp = must_sp(NULL, ars_url, &err);
+  if (!sp) return fail_err("create", &err);
+  char* artifact = artifact_for("");
+  char* esc = uri_escape(artifact);
+  char* url = malloc(strlen(esc) + 32);
+  sprintf(url, "/saml/acs?SAMLart=%s", esc);
+  char want[128];
+  snprintf(want, sizeof want, "http://%s is refused", host);
+  int rc = rejects(sp, "GET", url, NULL, "_r", "artifact", want);
+  if (!rc && l && connection_waiting(l)) rc = fail("a connection was opened");
+  free(url);
+  free(esc);
+  free(artifact);
+  iya_saml_sp_free(sp);
+  return rc;
+}
+
+static int test_plain_artifact(void) {
+  if (artifact_refused("http://example.com/saml2/ars", "example.com", NULL)) return 1;
+  Listener l = listen_loopback();
+  char url[96];
+  char host[32];
+  snprintf(url, sizeof url, "http://0.0.0.0:%d/ars", l.port);
+  snprintf(host, sizeof host, "0.0.0.0:%d", l.port);
+  int rc = artifact_refused(url, host, &l);
+  close(l.fd);
+  return rc;
+}
+
+static int transmitter_refused(const char* transmitter, const char* host, Listener* l) {
+  iya_saml_error err;
+  memset(&err, 0, sizeof err);
+  Seen seen;
+  memset(&seen, 0, sizeof seen);
+  iya_saml_receiver* receiver = iya_saml_receiver_new(transmitter, 0, on_end, &seen, on_log, &seen, &err);
+  if (!receiver) return fail_err("new", &err);
+  int rc = iya_saml_receiver_start(receiver, &err) == 0 ? fail("the receiver started") : refused_plain("transmitter", &err, "ssf", host);
+  if (!rc && l && connection_waiting(l)) rc = fail("a connection was opened");
+  iya_saml_receiver_free(receiver);
+  return rc;
+}
+
+static int test_plain_transmitter(void) {
+  if (transmitter_refused("http://example.com", "example.com", NULL)) return 1;
+  Listener l = listen_loopback();
+  char url[96];
+  char host[32];
+  snprintf(url, sizeof url, "http://0.0.0.0:%d", l.port);
+  snprintf(host, sizeof host, "0.0.0.0:%d", l.port);
+  int rc = transmitter_refused(url, host, &l);
+  close(l.fd);
+  return rc;
+}
+
+/* One GET answered with this IdP's metadata, on a loopback listener. */
+typedef struct {
+  Listener l;
+  pthread_t thread;
+  int served;
+} MetaServer;
+
+static void* meta_thread(void* arg) {
+  MetaServer* m = arg;
+  fd_set fds;
+  FD_ZERO(&fds);
+  FD_SET(m->l.fd, &fds);
+  struct timeval tv = {10, 0};
+  if (select(m->l.fd + 1, &fds, NULL, NULL, &tv) <= 0) return NULL;
+  int client = accept(m->l.fd, NULL, NULL);
+  if (client < 0) return NULL;
+  char *method, *path, *body;
+  char* raw = read_http(client, &method, &path, &body);
+  char* meta = idp_metadata("");
+  http_write(client, 200, "application/samlmetadata+xml", meta);
+  m->served = 1;
+  free(meta);
+  free(method);
+  free(path);
+  free(body);
+  free(raw);
+  close(client);
+  return NULL;
+}
+
+static int metadata_over(const char* host) {
+  MetaServer m;
+  memset(&m, 0, sizeof m);
+  m.l = listen_loopback();
+  pthread_create(&m.thread, NULL, meta_thread, &m);
+  char url[96];
+  snprintf(url, sizeof url, "http://%s:%d/saml2/metadata", host, m.l.port);
+  char* json = url_config(url);
+  iya_saml_error err;
+  memset(&err, 0, sizeof err);
+  iya_saml_sp* sp = iya_saml_create(json, "", &err);
+  free(json);
+  int rc = 0;
+  if (!sp) rc = fail_err(host, &err);
+  else if (strcmp(iya_saml_idp_entity_id(sp), kIdp) != 0 || !m.served) rc = fail("metadata not read");
+  iya_saml_sp_free(sp);
+  pthread_join(m.thread, NULL);
+  close(m.l.fd);
+  return rc;
+}
+
+static int test_plain_loopback(void) {
+  /* Plain http to loopback still works: 127.0.0.1 and localhost. */
+  if (metadata_over("127.0.0.1")) return 1;
+  if (metadata_over("localhost")) return 1;
+  /* https is not touched by the rule: a name that does not resolve fails as a
+   * connection failure, not as a refusal of plain http. */
+  iya_saml_error err;
+  if (!create_fails("https://idp.invalid/saml2/metadata", &err)) return fail("idp.invalid resolved");
+  if (strcmp(err.code, "metadata") != 0 || contains(err.message, "is refused")) {
+    printf("FAIL https: %s %s\n", err.code, err.message);
+    return 1;
+  }
+  return 0;
+}
+
 typedef struct {
   Tx* tx;
   iya_saml_receiver* receiver;
@@ -2671,7 +2888,7 @@ int main(int argc, char** argv) {
   const char* name = argv[1];
   if (argc > 2) demo_binary = argv[2];
   if (strcmp(name, "TestRefusesAConfigurationWithoutAKeyOrWithAnotherCertificate") == 0) return test_refuses_config();
-  if (strcmp(name, "TestReadsTheIdentityProviderFromItsMetadata") == 0) return test_reads_idp();
+  if (strcmp(name, "TestReadsTheIdentityProviderFromItsMetadata") == 0) return test_reads_idp() || test_plain_metadata() || test_plain_loopback();
   if (strcmp(name, "TestWritesMetadataWithASignedRequestsKeyAndTheAcsOnAllThreeBindings") == 0) return test_metadata();
   if (strcmp(name, "TestOmitsSignalsUnlessItIsFalse") == 0) return test_omits_signals();
   if (strcmp(name, "TestRecordsSignalsFalseAndStillResolvesTheSamlFields") == 0) return test_signals_false();
@@ -2700,15 +2917,19 @@ int main(int argc, char** argv) {
   if (strcmp(name, "TestRefusesAQuerySignatureByAnotherKeyAndAChangedRelayState") == 0) return test_bad_query_sig();
   if (strcmp(name, "TestResolvesTheArtifact") == 0) return test_artifact();
   if (strcmp(name, "TestAcceptsTheArtifactOnAPostAndFailsWhenAlreadyUsed") == 0) return test_artifact_post();
-  if (strcmp(name, "TestRefusesAnArtifactFromAnotherIdentityProvider") == 0) return test_foreign_artifact();
+  if (strcmp(name, "TestRefusesAnArtifactFromAnotherIdentityProvider") == 0) return test_foreign_artifact() || test_plain_artifact();
   if (strcmp(name, "TestRefusesARequestWithNoSamlMessage") == 0) return test_no_message();
   if (strcmp(name, "TestParseXMLHelperStaysAvailable") == 0) return test_parse_xml();
   if (strcmp(name, "TestVerifiesASetAgainstTheJwks") == 0) return test_jws();
   if (strcmp(name, "TestReadsComplexIssSubAndEmailSubjects") == 0) return test_subjects();
   if (strcmp(name, "TestNamesAllEightCaepAndFourteenRiscEventTypes") == 0) return test_event_names();
   if (strcmp(name, "TestSharedSignals") == 0) return test_shared();
-  if (strcmp(name, "TestRefusesATransmitterWithoutPollDelivery") == 0) return test_no_poll_delivery();
+  if (strcmp(name, "TestRefusesATransmitterWithoutPollDelivery") == 0) return test_no_poll_delivery() || test_plain_transmitter();
   if (strcmp(name, "TestStopWaitsForAnInFlightPoll") == 0) return test_stop_waits();
+  if (strcmp(name, "TestRefusesPlainHttpMetadataOffLoopbackWithoutConnecting") == 0) return test_plain_metadata();
+  if (strcmp(name, "TestRefusesPlainHttpArtifactResolutionOffLoopbackWithoutConnecting") == 0) return test_plain_artifact();
+  if (strcmp(name, "TestRefusesPlainHttpTransmitterOffLoopbackWithoutConnecting") == 0) return test_plain_transmitter();
+  if (strcmp(name, "TestAllowsPlainHttpToLoopbackAndLeavesHttpsAlone") == 0) return test_plain_loopback();
   if (strcmp(name, "TestConfigureScriptSignals") == 0) return test_configure_script();
   if (strcmp(name, "TestLiveStatusReportsTheSignInWithoutTokens") == 0) return test_live_status();
   fprintf(stderr, "unknown test %s\n", name);

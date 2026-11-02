@@ -108,6 +108,29 @@ Url parse_url(const std::string& raw) {
   return url;
 }
 
+// A loopback host: 127.0.0.0/8, ::1 or the name localhost. Plain http is
+// allowed only to one of these, where the bytes never leave the machine.
+bool is_loopback_host(const std::string& host) {
+  if (lower_copy(host) == "localhost") return true;
+  in_addr v4 {};
+  if (inet_pton(AF_INET, host.c_str(), &v4) == 1) return (ntohl(v4.s_addr) >> 24) == 127;
+  in6_addr v6 {};
+  if (inet_pton(AF_INET6, host.c_str(), &v6) == 1) return IN6_IS_ADDR_LOOPBACK(&v6);
+  return false;
+}
+
+// Throws unless a plain http URL names a loopback host. Userinfo is never
+// loopback, so "http://localhost:80@host/" cannot pass as localhost. The
+// message names the scheme and host only: never userinfo, path or query.
+void refuse_plain_http_off_loopback(const std::string& raw, const Url& url, const std::string& code) {
+  std::string authority = raw.substr(7);
+  authority = authority.substr(0, authority.find_first_of("/?#"));
+  auto at = authority.rfind('@');
+  if (at == std::string::npos && is_loopback_host(url.host)) return;
+  std::string shown = at == std::string::npos ? authority : authority.substr(at + 1);
+  throw Failure(code, "http://" + shown + " is refused: plain http is allowed only to a loopback host (127.0.0.0/8, ::1, localhost); use https");
+}
+
 struct Socket {
   int fd = -1;
   ~Socket() {
@@ -272,6 +295,13 @@ HttpResult http_send(const std::string& raw, const std::string& method, const st
                      const TlsOpt* tls, const std::string& code) {
   if (!(starts_with(raw, "https://") || starts_with(raw, "http://"))) throw Failure(code, raw + " is not an http(s) URL");
   Url url = parse_url(raw);
+  // Every fetch this library makes goes through here: the identity provider's
+  // metadata (its signing keys), the ArtifactResolve (the signed request out,
+  // the assertion back) and the Shared Signals transmitter (SETs and the
+  // bearer token). None of them may travel in the clear off this machine, so
+  // plain http is refused before any connection unless the host is loopback.
+  // The message names the scheme and host only: never userinfo, path or query.
+  if (!url.https) refuse_plain_http_off_loopback(raw, url, code);
   const int64_t deadline = now_ms() + 15000;
   Socket socket;
   socket.fd = connect_host(url, deadline, raw, code);
