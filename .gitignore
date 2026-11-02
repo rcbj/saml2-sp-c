@@ -1,0 +1,9 @@
+demo/generated/
+bin/
+build/
+*.exe
+*.test
+__pycache__/
+*.pyc
+venv/
+.venv/
