@@ -2,7 +2,9 @@
 
 Server-side SAML 2.0 service provider with CAEP and RISC for C and C++. The protocol is implemented once, in C++17. The C header declares the same operations as `extern "C"`. Those functions are defined in this library and call the C++ classes. C callers and C++ callers link one library binary.
 
-Version 0.1.0. License: MIT. `develop` and `main` are one commit. ## Using it from CMake
+Version 0.1.1. License: MIT. `develop` and `main` are one commit.
+
+## Using it from CMake
 
 The build installs the library, its public headers and a CMake package. It builds static by
 default and shared with `-DBUILD_SHARED_LIBS=ON`; `-DIYA_SAML_BUILD_TESTS=OFF -DIYA_SAML_BUILD_PROGRAMS=OFF`
