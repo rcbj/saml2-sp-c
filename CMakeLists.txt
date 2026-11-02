@@ -36,6 +36,9 @@ target_link_libraries(saml-demo PRIVATE saml2sp)
 add_executable(saml_tests tests/saml_tests.c)
 target_link_libraries(saml_tests PRIVATE saml2sp)
 
+add_executable(saml_trust_tests tests/trust.c)
+target_link_libraries(saml_trust_tests PRIVATE saml2sp OpenSSL::SSL OpenSSL::Crypto Threads::Threads)
+
 add_executable(cpp_api_test tests/cpp_api_test.cpp)
 target_link_libraries(cpp_api_test PRIVATE saml2sp)
 
@@ -80,9 +83,19 @@ set(SAML_CASES
   TestSharedSignals
   TestRefusesATransmitterWithoutPollDelivery
   TestStopWaitsForAnInFlightPoll
-  TestConfigureScriptSignals)
+  TestConfigureScriptSignals
+  TestLiveStatusReportsTheSignInWithoutTokens)
 foreach(name ${SAML_CASES})
-  add_test(NAME ${name} COMMAND saml_tests ${name})
+  add_test(NAME ${name} COMMAND saml_tests ${name} $<TARGET_FILE:saml-demo>)
+  set_tests_properties(${name} PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 180)
+endforeach()
+set(TRUST_CASES
+  TestIdpCaChainIsTheTrustStore
+  TestAForgedLeafBeforeTheRealCaIsRefused
+  TestHostNameIsChecked
+  TestConfigureWritesTheWholeChain)
+foreach(name ${TRUST_CASES})
+  add_test(NAME ${name} COMMAND saml_trust_tests ${name})
   set_tests_properties(${name} PROPERTIES WORKING_DIRECTORY ${CMAKE_SOURCE_DIR} TIMEOUT 180)
 endforeach()
 add_test(NAME TestCppApiLinksTheSameLibrary COMMAND cpp_api_test)

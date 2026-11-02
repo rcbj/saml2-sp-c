@@ -7,6 +7,7 @@
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/x509.h>
+#include <openssl/x509v3.h>
 
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -44,6 +45,27 @@ void set_deadline_opts(int fd, int64_t deadline) {
 }
 
 bool timed_out(int64_t deadline) { return now_ms() >= deadline; }
+
+bool is_ip_literal(const std::string& host) {
+  in_addr v4 {};
+  in6_addr v6 {};
+  return inet_pton(AF_INET, host.c_str(), &v4) == 1 || inet_pton(AF_INET6, host.c_str(), &v6) == 1;
+}
+
+// Every certificate in a PEM text, in order.
+std::vector<X509*> pem_certs(const std::string& pem) {
+  std::vector<X509*> out;
+  BIO* bio = BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size()));
+  if (!bio) return out;
+  for (;;) {
+    X509* cert = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
+    if (!cert) break;
+    out.push_back(cert);
+  }
+  BIO_free(bio);
+  ERR_clear_error();
+  return out;
+}
 
 struct Url {
   bool https = false;
@@ -260,13 +282,18 @@ HttpResult http_send(const std::string& raw, const std::string& method, const st
     if (!secure.ctx) throw Failure(code, raw + ": tls failed");
     SSL_CTX_set_min_proto_version(secure.ctx, TLS1_2_VERSION);
     if (tls && !tls->ca.empty()) {
-      BIO* bio = BIO_new_mem_buf(tls->ca.data(), static_cast<int>(tls->ca.size()));
-      X509* ca = PEM_read_bio_X509(bio, nullptr, nullptr, nullptr);
-      BIO_free(bio);
-      if (!ca) throw Failure(code, raw + ": the CA certificate cannot be read");
+      // idpCa is iya-sts's listener CA trust chain: leaf, TLS Issuing CA,
+      // Intermediate and Root. Every PEM block is a trust anchor. Reading only
+      // the first one (the leaf) leaves OpenSSL without the self-signed root,
+      // and it refuses the handshake ("self-signed certificate in certificate chain").
+      std::vector<X509*> anchors = pem_certs(tls->ca);
+      if (anchors.empty()) throw Failure(code, raw + ": the CA certificate cannot be read");
       X509_STORE* store = SSL_CTX_get_cert_store(secure.ctx);
-      X509_STORE_add_cert(store, ca);
-      X509_free(ca);
+      for (X509* ca : anchors) {
+        X509_STORE_add_cert(store, ca);
+        X509_free(ca);
+      }
+      ERR_clear_error();
     } else {
       SSL_CTX_set_default_verify_paths(secure.ctx);
     }
@@ -288,7 +315,16 @@ HttpResult http_send(const std::string& raw, const std::string& method, const st
     }
     secure.ssl = SSL_new(secure.ctx);
     SSL_set_fd(secure.ssl, socket.fd);
-    SSL_set_tlsext_host_name(secure.ssl, url.host.c_str());
+    // The certificate must name the host the URL names: a DNS name against a
+    // DNS SAN, an IP literal against an IP SAN. A chain to a trusted root is not
+    // enough on its own. RFC 6066 sends no server name for an IP literal.
+    if (is_ip_literal(url.host)) {
+      if (X509_VERIFY_PARAM_set1_ip_asc(SSL_get0_param(secure.ssl), url.host.c_str()) != 1) throw Failure(code, raw + ": tls failed");
+    } else {
+      SSL_set_hostflags(secure.ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+      if (SSL_set1_host(secure.ssl, url.host.c_str()) != 1) throw Failure(code, raw + ": tls failed");
+      SSL_set_tlsext_host_name(secure.ssl, url.host.c_str());
+    }
     if (SSL_connect(secure.ssl) != 1) throw Failure(code, raw + ": tls handshake failed");
     ssl = secure.ssl;
   }

@@ -18,6 +18,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <sys/select.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -2500,6 +2501,167 @@ static int test_configure_script(void) {
   return 0;
 }
 
+static char* demo_binary;
+
+// One HTTP/1.1 request to 127.0.0.1:port; the whole response (headers and body), or NULL.
+static char* demo_request(int port, const char* method, const char* path, const char* headers, const char* body) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  if (fd < 0) return NULL;
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  addr.sin_port = htons((uint16_t)port);
+  if (connect(fd, (struct sockaddr*)&addr, sizeof addr) != 0) {
+    close(fd);
+    return NULL;
+  }
+  struct timeval tv = {10, 0};
+  setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  size_t body_len = body ? strlen(body) : 0;
+  size_t cap = strlen(path) + (headers ? strlen(headers) : 0) + body_len + 256;
+  char* request = malloc(cap);
+  int n = snprintf(request, cap, "%s %s HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nConnection: close\r\nContent-Length: %zu\r\n%s\r\n%s", method, path, port, body_len,
+                   headers ? headers : "", body ? body : "");
+  send(fd, request, (size_t)n, MSG_NOSIGNAL);
+  free(request);
+  size_t len = 0;
+  size_t room = 4096;
+  char* out = malloc(room);
+  for (;;) {
+    if (len + 4096 > room) {
+      room *= 2;
+      out = realloc(out, room);
+    }
+    ssize_t got = recv(fd, out + len, 4095, 0);
+    if (got <= 0) break;
+    len += (size_t)got;
+  }
+  out[len] = '\0';
+  close(fd);
+  return out;
+}
+
+static const char* response_body(const char* response) {
+  const char* split = response ? strstr(response, "\r\n\r\n") : NULL;
+  return split ? split + 4 : "";
+}
+
+// The value of the first Set-Cookie for name, or "".
+static void set_cookie_value(const char* response, const char* name, char* out, size_t cap) {
+  out[0] = '\0';
+  char needle[128];
+  snprintf(needle, sizeof needle, "set-cookie: %s=", name);
+  const char* at = response ? strcasestr(response, needle) : NULL;
+  if (!at) return;
+  at += strlen(needle);
+  size_t n = 0;
+  while (at[n] && at[n] != ';' && at[n] != '\r' && n + 1 < cap) {
+    out[n] = at[n];
+    n++;
+  }
+  out[n] = '\0';
+}
+
+static int free_port(void) {
+  int fd = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = AF_INET;
+  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+  bind(fd, (struct sockaddr*)&addr, sizeof addr);
+  socklen_t len = sizeof addr;
+  getsockname(fd, (struct sockaddr*)&addr, &len);
+  int port = ntohs(addr.sin_port);
+  close(fd);
+  return port;
+}
+
+static int test_live_status(void) {
+  if (!demo_binary) return fail("the saml-demo path is required");
+  char dir[] = "/tmp/saml-live-XXXXXX";
+  if (!mkdtemp(dir)) return fail("mkdtemp");
+  char path[256];
+  snprintf(path, sizeof path, "%s/saml.json", dir);
+  char* json = config_json("\"allowUnsolicited\":true", "");
+  FILE* file = fopen(path, "w");
+  if (!file) return fail("write");
+  fputs(json, file);
+  fclose(file);
+  free(json);
+  int port = free_port();
+  pid_t pid = fork();
+  if (pid == 0) {
+    char port_text[16];
+    snprintf(port_text, sizeof port_text, "%d", port);
+    setenv("PORT", port_text, 1);
+    setenv("SAML_CONFIG", path, 1);
+    unsetenv("PUBLIC_URL");
+    freopen("/dev/null", "w", stdout);
+    execl(demo_binary, demo_binary, (char*)NULL);
+    _exit(127);
+  }
+  int rc = 0;
+  char* health = NULL;
+  for (int i = 0; i < 100 && !(health && strstr(health, "\r\n\r\nok")); i++) {
+    free(health);
+    usleep(100000);
+    health = demo_request(port, "GET", "/healthz", "", "");
+  }
+  if (!health || !strstr(health, "\r\n\r\nok")) rc = fail("the demo did not answer /healthz");
+  free(health);
+  char* before = rc ? NULL : demo_request(port, "GET", "/live-status", "", "");
+  if (!rc && (!before || !strcasestr(before, "content-type: application/json") || !strcasestr(before, "cache-control: no-store"))) rc = fail(before ? before : "live-status");
+  if (!rc && strcmp(response_body(before),
+                    "{\"signedIn\":false,\"subject\":null,\"receiver\":\"not configured (no ssf block in the configuration file)\",\"events\":[]}") != 0)
+    rc = fail(response_body(before));
+  free(before);
+  char* xml = NULL;
+  if (!rc) {
+    ResponseOpt opt = {0};
+    opt.sign = 1;
+    xml = response_xml(opt);
+  }
+  char* reply = NULL;
+  if (!rc) {
+    char* encoded = b64((const unsigned char*)xml, strlen(xml));
+    char* escaped = uri_escape(encoded);
+    size_t cap = strlen(escaped) + 32;
+    char* form = malloc(cap);
+    snprintf(form, cap, "SAMLResponse=%s", escaped);
+    reply = demo_request(port, "POST", "/saml/acs", "Content-Type: application/x-www-form-urlencoded\r\n", form);
+    free(form);
+    free(escaped);
+    free(encoded);
+    if (!reply || strncmp(reply, "HTTP/1.1 303", 12) != 0) rc = fail(reply ? reply : "acs");
+  }
+  char sid[256] = "";
+  if (!rc) {
+    set_cookie_value(reply, "sid", sid, sizeof sid);
+    if (!sid[0]) rc = fail("no sid cookie");
+  }
+  if (!rc) {
+    char cookie[320];
+    snprintf(cookie, sizeof cookie, "Cookie: sid=%s\r\n", sid);
+    char* after = demo_request(port, "GET", "/live-status", cookie, "");
+    const char* body = response_body(after);
+    if (!contains(body, "\"signedIn\":true") || !contains(body, "\"subject\":\"alice-1234\"")) rc = fail(body);
+    else if (contains(body, "Assertion") || contains(body, "SAMLResponse") || contains(body, "token") || contains(body, "_session1")) rc = fail(body);
+    free(after);
+    char* other = demo_request(port, "GET", "/live-status", "", "");
+    if (!rc && !contains(response_body(other), "\"signedIn\":false")) rc = fail(response_body(other));
+    free(other);
+  }
+  free(reply);
+  free(xml);
+  kill(pid, SIGTERM);
+  int status = 0;
+  waitpid(pid, &status, 0);
+  unlink(path);
+  rmdir(dir);
+  return rc;
+}
+
 int main(int argc, char** argv) {
   if (argc < 2) {
     fprintf(stderr, "test name required\n");
@@ -2507,6 +2669,7 @@ int main(int argc, char** argv) {
   }
   if (init_keys() != 0) return 1;
   const char* name = argv[1];
+  if (argc > 2) demo_binary = argv[2];
   if (strcmp(name, "TestRefusesAConfigurationWithoutAKeyOrWithAnotherCertificate") == 0) return test_refuses_config();
   if (strcmp(name, "TestReadsTheIdentityProviderFromItsMetadata") == 0) return test_reads_idp();
   if (strcmp(name, "TestWritesMetadataWithASignedRequestsKeyAndTheAcsOnAllThreeBindings") == 0) return test_metadata();
@@ -2547,6 +2710,7 @@ int main(int argc, char** argv) {
   if (strcmp(name, "TestRefusesATransmitterWithoutPollDelivery") == 0) return test_no_poll_delivery();
   if (strcmp(name, "TestStopWaitsForAnInFlightPoll") == 0) return test_stop_waits();
   if (strcmp(name, "TestConfigureScriptSignals") == 0) return test_configure_script();
+  if (strcmp(name, "TestLiveStatusReportsTheSignInWithoutTokens") == 0) return test_live_status();
   fprintf(stderr, "unknown test %s\n", name);
   return 2;
 }
