@@ -115,6 +115,8 @@ static char* json_quote(const char* text) {
     } else if (*p == '\r') {
       out[j++] = '\\';
       out[j++] = 'r';
+    } else if (*p < 0x20) {
+      j += (size_t)snprintf(out + j, cap - j, "\\u%04x", *p);
     } else out[j++] = (char)*p;
   }
   out[j++] = '"';
@@ -2523,6 +2525,80 @@ static int test_plain_transmitter(void) {
   return rc;
 }
 
+/* Whitespace and control characters (#16), run inside
+ * TestReadsTheIdentityProviderFromItsMetadata and by its own name. Every URL
+ * below names the loopback listener, which plain http may reach: without the
+ * refusal the library would connect to it (the WHATWG rules would also read
+ * "local\nhost" as localhost). With it, each fetch is refused with its own
+ * code, the message never repeats the URL, and nothing connects. */
+static const char* kWhitespace = "whitespace or a control character";
+
+static int refused_whitespace(const char* what, const iya_saml_error* err, const char* code) {
+  if (strcmp(err->code, code) != 0 || !contains(err->message, kWhitespace) || contains(err->message, "127.0.0.1")) {
+    printf("FAIL %s: code %s want %s: %s\n", what, err->code, code, err->message);
+    return 1;
+  }
+  return 0;
+}
+
+static int test_whitespace_urls(void) {
+  static const char* kInserts[] = {"\t", " ", "\n", "\r\n", "\x7f", "\x01", "\xc2\xa0", "\xc2\x85", "\xe2\x80\xa8", "\xe3\x80\x80"};
+  Listener l = listen_loopback();
+  int rc = 0;
+  char url[128];
+  iya_saml_error err;
+  for (size_t i = 0; !rc && i < sizeof kInserts / sizeof kInserts[0]; i++) {
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/saml2/m%setadata", l.port, kInserts[i]);
+    if (!create_fails(url, &err)) rc = fail("metadata with whitespace accepted");
+    if (!rc) rc = refused_whitespace("metadata", &err, "metadata");
+  }
+  if (!rc) {
+    snprintf(url, sizeof url, "http://local\nhost:%d/saml2/metadata", l.port);
+    if (!create_fails(url, &err)) rc = fail("local\\nhost accepted");
+    if (!rc) rc = refused_whitespace("host", &err, "metadata");
+  }
+  if (!rc) {
+    snprintf(url, sizeof url, "https://127.0.0.1:%d/saml2/m\tetadata", l.port);
+    if (!create_fails(url, &err)) rc = fail("https with a tab accepted");
+    if (!rc) rc = refused_whitespace("https", &err, "metadata");
+  }
+  /* A Location in metadata, then the ArtifactResolve. */
+  if (!rc) {
+    snprintf(url, sizeof url, "http://127.0.0.1:%d/saml2/a rs", l.port);
+    memset(&err, 0, sizeof err);
+    iya_saml_sp* sp = must_sp(NULL, url, &err);
+    if (!sp) rc = fail_err("create", &err);
+    if (sp) {
+      char* artifact = artifact_for("");
+      char* esc = uri_escape(artifact);
+      char* acs = malloc(strlen(esc) + 32);
+      sprintf(acs, "/saml/acs?SAMLart=%s", esc);
+      rc = rejects(sp, "GET", acs, NULL, "_r", "artifact", kWhitespace);
+      free(acs);
+      free(esc);
+      free(artifact);
+      iya_saml_sp_free(sp);
+    }
+  }
+  /* The transmitter. */
+  for (int k = 0; !rc && k < 2; k++) {
+    snprintf(url, sizeof url, k == 0 ? "http://127.0.0.1:%d/s\tsf" : "http://127.0.0.1:%d/s\xc2\xa0sf", l.port);
+    memset(&err, 0, sizeof err);
+    Seen seen;
+    memset(&seen, 0, sizeof seen);
+    iya_saml_receiver* receiver = iya_saml_receiver_new(url, 0, on_end, &seen, on_log, &seen, &err);
+    if (!receiver) {
+      rc = fail_err("new", &err);
+      break;
+    }
+    rc = iya_saml_receiver_start(receiver, &err) == 0 ? fail("the receiver started") : refused_whitespace("transmitter", &err, "ssf");
+    iya_saml_receiver_free(receiver);
+  }
+  if (!rc && connection_waiting(&l)) rc = fail("a connection was opened");
+  close(l.fd);
+  return rc;
+}
+
 /* One GET answered with this IdP's metadata, on a loopback listener. */
 typedef struct {
   Listener l;
@@ -2888,7 +2964,7 @@ int main(int argc, char** argv) {
   const char* name = argv[1];
   if (argc > 2) demo_binary = argv[2];
   if (strcmp(name, "TestRefusesAConfigurationWithoutAKeyOrWithAnotherCertificate") == 0) return test_refuses_config();
-  if (strcmp(name, "TestReadsTheIdentityProviderFromItsMetadata") == 0) return test_reads_idp() || test_plain_metadata() || test_plain_loopback();
+  if (strcmp(name, "TestReadsTheIdentityProviderFromItsMetadata") == 0) return test_reads_idp() || test_plain_metadata() || test_plain_loopback() || test_whitespace_urls();
   if (strcmp(name, "TestWritesMetadataWithASignedRequestsKeyAndTheAcsOnAllThreeBindings") == 0) return test_metadata();
   if (strcmp(name, "TestOmitsSignalsUnlessItIsFalse") == 0) return test_omits_signals();
   if (strcmp(name, "TestRecordsSignalsFalseAndStillResolvesTheSamlFields") == 0) return test_signals_false();
@@ -2930,6 +3006,7 @@ int main(int argc, char** argv) {
   if (strcmp(name, "TestRefusesPlainHttpArtifactResolutionOffLoopbackWithoutConnecting") == 0) return test_plain_artifact();
   if (strcmp(name, "TestRefusesPlainHttpTransmitterOffLoopbackWithoutConnecting") == 0) return test_plain_transmitter();
   if (strcmp(name, "TestAllowsPlainHttpToLoopbackAndLeavesHttpsAlone") == 0) return test_plain_loopback();
+  if (strcmp(name, "TestRefusesAUrlWithWhitespaceOrAControlCharacterWithoutConnecting") == 0) return test_whitespace_urls();
   if (strcmp(name, "TestConfigureScriptSignals") == 0) return test_configure_script();
   if (strcmp(name, "TestLiveStatusReportsTheSignInWithoutTokens") == 0) return test_live_status();
   fprintf(stderr, "unknown test %s\n", name);
