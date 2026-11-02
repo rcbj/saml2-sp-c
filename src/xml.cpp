@@ -330,7 +330,7 @@ XmlDoc parse_xml(const std::string& text, const std::string& what) {
   }
   xmlDocPtr doc = xmlCtxtReadMemory(ctxt, text.data(), static_cast<int>(text.size()), "saml.xml", nullptr, XML_PARSE_NONET | XML_PARSE_NOERROR | XML_PARSE_NOWARNING | XML_PARSE_NOCDATA);
   std::string message = "parse error";
-  xmlErrorPtr err = xmlCtxtGetLastError(ctxt);
+  const xmlError *err = xmlCtxtGetLastError(ctxt);
   if (err && err->message) {
     message = err->message;
     while (!message.empty() && (message.back() == '\n' || message.back() == '\r')) message.pop_back();
