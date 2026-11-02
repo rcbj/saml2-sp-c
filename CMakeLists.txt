@@ -132,6 +132,10 @@ set(SAML_CASES
   TestSharedSignals
   TestRefusesATransmitterWithoutPollDelivery
   TestStopWaitsForAnInFlightPoll
+  TestRefusesPlainHttpMetadataOffLoopbackWithoutConnecting
+  TestRefusesPlainHttpArtifactResolutionOffLoopbackWithoutConnecting
+  TestRefusesPlainHttpTransmitterOffLoopbackWithoutConnecting
+  TestAllowsPlainHttpToLoopbackAndLeavesHttpsAlone
   TestConfigureScriptSignals
   TestLiveStatusReportsTheSignInWithoutTokens)
 foreach(name ${SAML_CASES})
