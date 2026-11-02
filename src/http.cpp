@@ -108,6 +108,37 @@ Url parse_url(const std::string& raw) {
   return url;
 }
 
+// Throws when a URL holds whitespace or a control character: an ASCII control
+// (0x00-0x1f, 0x7f) or space, a C1 control, U+00A0, or any other Unicode
+// White_Space code point. The WHATWG parser drops tabs and newlines and trims
+// spaces, so another reader of such a URL can see a different host than this
+// parser dials, and a CR or LF in the path would reach the request line. None
+// is ever a valid URL. The message never repeats the URL.
+void refuse_whitespace_or_control(const std::string& raw, const std::string& code) {
+  const auto* p = reinterpret_cast<const unsigned char*>(raw.data());
+  const size_t n = raw.size();
+  for (size_t i = 0; i < n;) {
+    unsigned char b = p[i];
+    uint32_t cp = b;
+    size_t len = 1;
+    if (b >= 0xc0 && b < 0xe0 && i + 1 < n) {
+      cp = ((b & 0x1fu) << 6) | (p[i + 1] & 0x3fu);
+      len = 2;
+    } else if (b >= 0xe0 && b < 0xf0 && i + 2 < n) {
+      cp = ((b & 0x0fu) << 12) | ((p[i + 1] & 0x3fu) << 6) | (p[i + 2] & 0x3fu);
+      len = 3;
+    } else if (b >= 0xf0 && i + 3 < n) {
+      cp = 0x10000;  // outside every range below
+      len = 4;
+    }
+    bool bad = cp <= 0x20 || cp == 0x7f || (cp >= 0x80 && cp <= 0xa0) || cp == 0x1680 ||
+               (cp >= 0x2000 && cp <= 0x200a) || cp == 0x2028 || cp == 0x2029 || cp == 0x202f ||
+               cp == 0x205f || cp == 0x3000;
+    if (bad) throw Failure(code, "the URL is refused: it holds whitespace or a control character");
+    i += len;
+  }
+}
+
 // A loopback host: 127.0.0.0/8, ::1 or the name localhost. Plain http is
 // allowed only to one of these, where the bytes never leave the machine.
 bool is_loopback_host(const std::string& host) {
@@ -293,6 +324,9 @@ std::string decode_chunked(const std::string& body, const std::string& raw, cons
 
 HttpResult http_send(const std::string& raw, const std::string& method, const std::vector<std::pair<std::string, std::string>>& headers, const std::string& body,
                      const TlsOpt* tls, const std::string& code) {
+  // First, before the scheme check or the parse, so that no message repeats
+  // such a URL and no parser gets to read it.
+  refuse_whitespace_or_control(raw, code);
   if (!(starts_with(raw, "https://") || starts_with(raw, "http://"))) throw Failure(code, raw + " is not an http(s) URL");
   Url url = parse_url(raw);
   // Every fetch this library makes goes through here: the identity provider's
