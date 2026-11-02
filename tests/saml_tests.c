@@ -2372,7 +2372,11 @@ static int test_no_poll_delivery(void) {
   return bad;
 }
 
-/* Plain http off loopback. Each fetch (metadata, ArtifactResolve, the
+/* Plain http off loopback (#8). These run inside three registered tests
+ * (TestReadsTheIdentityProviderFromItsMetadata,
+ * TestRefusesAnArtifactFromAnotherIdentityProvider,
+ * TestRefusesATransmitterWithoutPollDelivery) and by their own names when the
+ * binary is run by hand. Each fetch (metadata, ArtifactResolve, the
  * transmitter) is refused before a connection is opened. http://example.com
  * names a host off this machine; http://0.0.0.0:<port> is not loopback either
  * but Linux delivers it to a socket on 127.0.0.1, so a listener there shows
@@ -2884,7 +2888,7 @@ int main(int argc, char** argv) {
   const char* name = argv[1];
   if (argc > 2) demo_binary = argv[2];
   if (strcmp(name, "TestRefusesAConfigurationWithoutAKeyOrWithAnotherCertificate") == 0) return test_refuses_config();
-  if (strcmp(name, "TestReadsTheIdentityProviderFromItsMetadata") == 0) return test_reads_idp();
+  if (strcmp(name, "TestReadsTheIdentityProviderFromItsMetadata") == 0) return test_reads_idp() || test_plain_metadata() || test_plain_loopback();
   if (strcmp(name, "TestWritesMetadataWithASignedRequestsKeyAndTheAcsOnAllThreeBindings") == 0) return test_metadata();
   if (strcmp(name, "TestOmitsSignalsUnlessItIsFalse") == 0) return test_omits_signals();
   if (strcmp(name, "TestRecordsSignalsFalseAndStillResolvesTheSamlFields") == 0) return test_signals_false();
@@ -2913,14 +2917,14 @@ int main(int argc, char** argv) {
   if (strcmp(name, "TestRefusesAQuerySignatureByAnotherKeyAndAChangedRelayState") == 0) return test_bad_query_sig();
   if (strcmp(name, "TestResolvesTheArtifact") == 0) return test_artifact();
   if (strcmp(name, "TestAcceptsTheArtifactOnAPostAndFailsWhenAlreadyUsed") == 0) return test_artifact_post();
-  if (strcmp(name, "TestRefusesAnArtifactFromAnotherIdentityProvider") == 0) return test_foreign_artifact();
+  if (strcmp(name, "TestRefusesAnArtifactFromAnotherIdentityProvider") == 0) return test_foreign_artifact() || test_plain_artifact();
   if (strcmp(name, "TestRefusesARequestWithNoSamlMessage") == 0) return test_no_message();
   if (strcmp(name, "TestParseXMLHelperStaysAvailable") == 0) return test_parse_xml();
   if (strcmp(name, "TestVerifiesASetAgainstTheJwks") == 0) return test_jws();
   if (strcmp(name, "TestReadsComplexIssSubAndEmailSubjects") == 0) return test_subjects();
   if (strcmp(name, "TestNamesAllEightCaepAndFourteenRiscEventTypes") == 0) return test_event_names();
   if (strcmp(name, "TestSharedSignals") == 0) return test_shared();
-  if (strcmp(name, "TestRefusesATransmitterWithoutPollDelivery") == 0) return test_no_poll_delivery();
+  if (strcmp(name, "TestRefusesATransmitterWithoutPollDelivery") == 0) return test_no_poll_delivery() || test_plain_transmitter();
   if (strcmp(name, "TestStopWaitsForAnInFlightPoll") == 0) return test_stop_waits();
   if (strcmp(name, "TestRefusesPlainHttpMetadataOffLoopbackWithoutConnecting") == 0) return test_plain_metadata();
   if (strcmp(name, "TestRefusesPlainHttpArtifactResolutionOffLoopbackWithoutConnecting") == 0) return test_plain_artifact();
