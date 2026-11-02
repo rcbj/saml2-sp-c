@@ -1,6 +1,6 @@
 # saml2-sp
 
-C and C++ service provider for SAML 2.0 Web Browser SSO, plus a Shared Signals poll receiver. One implementation, in C++17. C and C++ call the same library. Version 0.1.0. MIT. `develop` and `main` are one commit. Publishing is not set up.
+C and C++ service provider for SAML 2.0 Web Browser SSO, plus a Shared Signals poll receiver. One implementation, in C++17. C and C++ call the same library. Version 0.1.0. MIT. `develop` and `main` are one commit. The library is a CMake package: `find_package(iya_saml)` gives `iya::saml`; static by default, shared with `BUILD_SHARED_LIBS`; `IYA_SAML_BUILD_TESTS` and `IYA_SAML_BUILD_PROGRAMS` default on only at the top level. `tests/package/check.sh` (run by the Docker test stage) installs both variants and builds the smoke test against each. A pull request merged into `main` releases the library after the test workflow succeeds on that commit: `release.yml` tags `v<VERSION>` and makes a GitHub Release, whose source archive is what a package recipe (such as a ConanCenter one) builds from. A direct push does not release. A tag that already exists stays; the next release is a new version in `VERSION`, which the CMake project, the package and the tag all read.
 
 ## One implementation
 
