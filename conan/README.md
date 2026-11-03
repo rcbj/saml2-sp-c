@@ -1,5 +1,7 @@
 # ConanCenter recipe
 
+ConanCenter declined it on 2026-11-03 until the repository has a longer history (conan-io/conan-center-index#31317–#31320). Until it is resubmitted, users build from a clone with the root `conanfile.py` (see the top-level README's *Using it from Conan*).
+
 The recipe for `iya-saml2-sp` in [conan-center-index](https://github.com/conan-io/conan-center-index)'s
 layout: copy this directory to `recipes/iya-saml2-sp/` there.
 
