@@ -40,14 +40,13 @@ class IyaSaml2SpConan(ConanFile):
 
     def set_version(self):
         # VERSION is the one version: the CMake project, the release tag and this package.
-        self.version = load(self, os.path.join(self.recipe_folder, "VERSION")).strip()
-
-    def export(self):
-        # A --version that is not VERSION's would label this tree as another release.
+        # Conan calls this even when --version is given (self.version is then already set);
+        # a --version that is not VERSION's would label this tree as another release.
         version = load(self, os.path.join(self.recipe_folder, "VERSION")).strip()
-        if str(self.version) != version:
+        if self.version and str(self.version) != version:
             raise ConanException(
                 f"--version {self.version} is not this checkout's VERSION, {version}")
+        self.version = version
 
     def layout(self):
         cmake_layout(self)
