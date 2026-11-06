@@ -19,7 +19,7 @@ The package finds the library's own dependencies, and the target carries the inc
 directory and C++17. The Docker test stage checks this: it installs the static and the shared
 library and builds the C++ smoke test against each through `find_package` (`tests/package/`).
 
-A pull request merged into `main` releases the library after the test workflow succeeds on that commit: `release.yml` tags `v<VERSION>` and makes a GitHub Release, whose source archive is what a package recipe (such as a ConanCenter one) builds from. A direct push does not release. A tag that already exists stays; the next release is a new version in `VERSION`, which the CMake project, the package and the tag all read.
+A pull request merged into `main` releases the library after the test workflow succeeds on that commit: `release.yml` tags `v<VERSION>` and makes a GitHub Release, whose source archive is what a package recipe (such as a ConanCenter one) builds from. A direct push does not release. A tag that already exists stays. A pull request into `main` that changes the library must raise `VERSION`, which the CMake project, the package and the tag all read: `version-check.yml` fails it otherwise, so the bump lands on `develop` first. `release.yml` then tags the merge commit on `main`, and a change to tests, the demo, or the docs releases nothing.
 
 ## Using it from Conan
 
