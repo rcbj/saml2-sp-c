@@ -1,0 +1,29 @@
+# SPDX-FileCopyrightText: 2026 Iya CyberSecurity Solutions, LLC
+# SPDX-License-Identifier: MIT
+#
+# A pull request into main that changes the library must raise VERSION, because
+# the release tag goes on the merge commit and CMake and Conan read VERSION from it.
+name: version check
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Require VERSION to be raised when the library changed
+        env:
+          SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          python3 .github/scripts/release_decision.py decide cmake - "$SHA" src include CMakeLists.txt cmake conanfile.py
